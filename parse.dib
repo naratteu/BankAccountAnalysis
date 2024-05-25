@@ -1,0 +1,146 @@
+#!meta
+
+{"kernelInfo":{"defaultKernelName":"csharp","items":[{"aliases":[],"languageName":"csharp","name":"csharp"}]}}
+
+#!csharp
+
+public static IEnumerable<DateOnly> DateRange(DateOnly min, DateOnly max, Func<DateOnly, DateOnly> adder)
+{
+    for (var curr = min; curr < max; curr = adder(curr))
+        yield return curr;
+    yield return max;
+}
+static int? Find<T>(this SortedList<DateOnly, T> List, in DateOnly want, out int pos)
+{
+    int min = 0, ovr = List.Count;
+    for (int pre = -1; pre != (pos = (min + ovr) >> 1); pre = pos)
+        switch (List.Comparer.Compare(want, List.GetKeyAtIndex(pos)))
+        {
+            case < 0: ovr = pos; break; //원하는게 찾은거보다 작으면
+            case 0: return null;
+            case > 0: min = pos; break; //원하는게 찾은거보다 크면
+        }
+    return ovr - min;
+}
+public static Dictionary<DateOnly, T> Interpol<T>(this IEnumerable<DateOnly> range, SortedList<DateOnly, T> List, Func<DateOnly, T?, T?, T> interpol)
+    => range.ToDictionary(key => key, key => List.Find(key, out var pos) switch
+    {
+        null => List.GetValueAtIndex(pos),
+        int offset when List.Values is var v && pos + offset is int pof => interpol(key, v.Take(pof).LastOrDefault(), v.Skip(pof).FirstOrDefault()),
+    });
+
+#!csharp
+
+#r "nuget: ExcelDataReader, 3.6.0"
+#r "nuget: ExcelDataReader.DataSet, 3.6.0"
+using System.IO;
+using ExcelDataReader;
+using System.Data;
+
+"<h1>우리은행 PC웹 에서 각 계좌이체내역을 xls로 가져옵니다.</h1>".DisplayAs("text/html");
+
+Microsoft.DotNet.Interactive.Formatting.Formatter.ListExpansionLimit = int.MaxValue;
+record Don(DateOnly Date, int 출금, int 입금, int 잔액)
+{
+    public int 손익 => 입금 - 출금;
+}
+static Dictionary<DateOnly, Don> ss(string file, bool is구분 = false)
+{
+    using (var stream = File.OpenRead(file))
+    using (var reader = ExcelReaderFactory.CreateReader(stream))
+    {
+        var parse = reader.AsDataSet().Tables.Cast<DataTable>().Single().AsEnumerable().Select(row => row switch
+        {
+            { ItemArray: [var c0,var c1,var c2,var c3,var c4,var c5,var c6,var c7,var c8] }  => new{c0,c1,c2,c3,c4,c5,c6,c7,c8}
+        });
+        parse.Skip(2).First().c1.Display();
+        var gen = (parse.Skip(6).SkipLast(1) switch
+        {
+            { } data => is구분 ?
+                data.Select(c => new{ 거래일시 = c.c0, 적요 = c.c2, 출금액 = c.c3, 입금액 = c.c4, 잔액 = c.c5 }) :
+                data.Select(c => new{ 거래일시 = c.c0, 적요 = c.c1, 출금액 = c.c2, 입금액 = c.c3, 잔액 = c.c4 })
+        }).Select(c => new
+        {
+            거래일시 = DateTime.Parse(c.거래일시.ToString()),
+            적요 = c.적요.ToString(),
+            출금액 = int.Parse(c.출금액.ToString()),
+            입금액 = int.Parse(c.입금액.ToString()),
+            잔액 = int.Parse(c.잔액.ToString()),
+        });
+
+        SortedList<DateOnly, Don>
+            sl = new((from i in gen group i by DateOnly.FromDateTime(i.거래일시) into g
+                      select new Don(g.Key, g.Sum(i => i.출금액), g.Sum(i => i.입금액), g.MaxBy(i => i.거래일시).잔액)).ToDictionary(i=>i.Date));
+        return DateRange(new DateOnly(2023,11,3), DateOnly.FromDateTime(DateTime.Now), date => date.AddDays(1))
+            .Interpol(sl,(date, pre, post) => new(date, 0,0,pre?.잔액 ?? 0));
+    }
+}
+var 우리 = ss("./우리.xls", true);
+var 국민 = ss("./국민.xls");
+var 신한 = ss("./신한.xls");
+var 토스 = ss("./토스.xls");
+
+#!csharp
+
+var full = 신한.Keys.Select(date => new
+{
+    date,
+    신한 = 신한[date].잔액,
+    우리 = 우리[date].잔액,
+    국민 = 국민[date].잔액,
+    토스 = 토스[date].잔액,
+}).Select(v => new
+{
+    v.date,
+    v.신한,
+    v.국민,
+    v.우리,
+    v.토스,
+    sum = v.국민 + v.신한 + v.우리 + v.토스,
+});
+var zip = full.Zip(full.Skip(1));
+
+#!csharp
+
+#r "nuget: RazorInteractive, 1.1.10"
+
+#!razor
+
+@{ const int h = 5; }
+<style>
+svg {
+  width: 1000px;
+  height: @(h)px;
+  display: block;
+}
+polygon {
+}
+polygon.l {
+    fill:lightblue;
+}
+polygon.r {
+    fill:red;
+}
+polygon.g {
+    fill:green;
+}
+polygon.b {
+    fill:blue;
+}
+</style>
+@foreach(var pp in Model.zip)
+{
+    var i1 = pp.Item1;
+    var i2 = pp.Item2;
+    double rr1 = 0, rr2 = 0;
+    double r1 = 0, r2 = 0;
+    <svg>
+        <polygon class="l" points="@(rr1 += i1.신한 * 0.00001),0 @r1,0 @r2,@h @(rr2 += i2.신한 * 0.00001),@h" />
+        @{ r1 = rr1; r2 = rr2; }
+        <polygon class="r" points="@(rr1 += i1.국민 * 0.00001),0 @r1,0 @r2,@h @(rr2 += i2.국민 * 0.00001),@h" />
+        @{ r1 = rr1; r2 = rr2; }
+        <polygon class="b" points="@(rr1 += i1.토스 * 0.00001),0 @r1,0 @r2,@h @(rr2 += i2.토스 * 0.00001),@h" />
+        @{ r1 = rr1; r2 = rr2; }
+        <polygon class="g" points="@(rr1 += i1.우리 * 0.00001),0 @r1,0 @r2,@h @(rr2 += i2.우리 * 0.00001),@h" />
+    </svg>
+}
